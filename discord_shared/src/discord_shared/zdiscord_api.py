@@ -4,9 +4,13 @@ from multiprocessing import Process, Queue
 
 
 class DiscordBot:
-    def __init__(self, token, channel_id, print_bot_data=True):
+    def __init__(self, token, channel_or_person_id, is_dm=False, print_bot_data=True):
         self.token = token
-        self.channel_id = channel_id
+        if is_dm:
+            self.user_id = channel_or_person_id
+        else:
+            self.channel_id = channel_or_person_id
+        self.is_dm = is_dm
         self.msg_queue = Queue()
         self.response_queue = Queue()
         self.user_response = ""
@@ -20,12 +24,18 @@ class DiscordBot:
         self.bot_on.put("on")
         if self.print_bot_data:
             print(f'Logged in as {self.client.user.name}')
-        self.channel = self.client.get_channel(self.channel_id)
+        if self.is_dm:
+            self.user = await self.client.fetch_user(self.user_id)
+        else:
+            self.channel = await self.client.fetch_channel(self.channel_id)
         self.my_background_task.start()
 
     async def on_message(self, message):
         if message.author == self.client.user:
             return False
+        if self.is_dm:
+            if message.author != self.user:
+                return False
         if self.print_bot_data:
             print(f"Received: {message.content} {type(message.content)}")
         self.response_queue.put(str(message.content))
@@ -55,7 +65,10 @@ class DiscordBot:
 
                 for item_list in message:
                     msg = "\n".join(item_list)
-                    await self.channel.send(msg)
+                    if self.is_dm:
+                        await self.user.send(msg)
+                    else:
+                        await self.channel.send(msg)
 
             elif msg_type == self.msg_img_payload:
                 await self.channel.send(content=payload.get("caption"), file=discord.File(payload["path"]))
