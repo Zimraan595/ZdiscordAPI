@@ -1,6 +1,11 @@
+import time
+
 import discord
+from discord import app_commands
 from discord.ext import tasks
 from multiprocessing import Process, Queue
+from threading import Thread
+import asyncio
 
 
 class DiscordBot:
@@ -16,19 +21,31 @@ class DiscordBot:
         self.user_response = ""
         self.msg_text_payload = "text"
         self.msg_img_payload = "img"
-        self.bot_on = Queue()
+        self.bot_on = False
         self.print_bot_data = print_bot_data
         self.discord_max_char_limit = 2000
 
+        self.client = discord.Client(intents=discord.Intents.all())
+        self.client.event(self.on_ready)
+        self.client.event(self.on_message)
+
+        if not self.is_dm:
+            self.guild_id = None
+            self.tree = app_commands.CommandTree(self.client)
+            self.command_response = {"bool": False, "func": None, "replied": False}
+            self.command_running = False
+
     async def on_ready(self):
-        self.bot_on.put("on")
         if self.print_bot_data:
             print(f'Logged in as {self.client.user.name}')
         if self.is_dm:
             self.user = await self.client.fetch_user(self.user_id)
         else:
             self.channel = await self.client.fetch_channel(self.channel_id)
+            if self.guild_id is None:
+                self.guild_id = self.channel.guild.id
         self.my_background_task.start()
+        self.bot_on = True
 
     async def on_message(self, message):
         if message.author == self.client.user:
@@ -38,7 +55,7 @@ class DiscordBot:
                 return False
         if self.print_bot_data:
             print(f"Received: {message.content} {type(message.content)}")
-        self.response_queue.put(str(message.content))
+        self.response_queue.put(f"{str(message.content)}:{message.author.id}")
 
     @tasks.loop(seconds=0.1)
     async def my_background_task(self):
@@ -67,11 +84,18 @@ class DiscordBot:
                     msg = "\n".join(item_list)
                     if self.is_dm:
                         await self.user.send(msg)
+                    elif self.command_response["bool"]:
+                        await self.command_response["func"](msg)
+                        self.command_response["bool"] = False
+                        self.command_response["replied"] = True
                     else:
                         await self.channel.send(msg)
 
             elif msg_type == self.msg_img_payload:
-                await self.channel.send(content=payload.get("caption"), file=discord.File(payload["path"]))
+                if self.is_dm:
+                    await self.user.send(content=payload.get("caption"), file=discord.File(payload["path"]))
+                else:
+                    await self.channel.send(content=payload.get("caption"), file=discord.File(payload["path"]))
 
     def split_by_char_limit(self, items, headroom=100):
         """
@@ -138,33 +162,96 @@ class DiscordBot:
         return chunks
 
     def run_process(self):
-        self.client = discord.Client(intents=discord.Intents.all())
-
-        self.client.event(self.on_ready)
-        self.client.event(self.on_message)
-
         self.client.run(self.token)
 
-    def start_bot(self):
-        self.p = Process(target=self.run_process)
+    def start_bot(self):  # main function to start the bot
+        self.p = Thread(target=self.run_process, daemon=True)
         self.p.start()
+
+    def set_command(self, name, description, exclusive=False):
+        safe_name = name.lower().replace(" ", "-")
+
+        def decorator(handler):
+            import inspect
+            handler_params = inspect.signature(handler).parameters
+
+            # Params we inject ourselves — not exposed to Discord
+            injected = {"user_id", "respond"}
+            discord_params = {k: v for k, v in handler_params.items() if k not in injected}
+
+            async def wrapped(interaction: discord.Interaction, **discord_kwargs):
+                await interaction.response.defer()
+
+                # Start with the Discord-provided params, then inject ours
+                kwargs = dict(discord_kwargs)
+                if "user_id" in handler_params:
+                    kwargs["user_id"] = interaction.user.id
+
+                async def respond(message):
+                    await interaction.followup.send(message)
+
+                if exclusive and self.command_running:
+                    await interaction.followup.send("⚠️ A command is already running, please wait.", ephemeral=True)
+                    return
+
+                if exclusive:
+                    self.command_running = True
+
+                self.command_response["bool"] = True
+                self.command_response["func"] = respond
+
+                def run_handler():
+                    import asyncio as _asyncio
+                    _asyncio.run(handler(**kwargs))
+
+                await asyncio.to_thread(run_handler)
+
+                if exclusive:
+                    self.command_running = False
+
+                if self.command_response["replied"]:
+                    self.command_response["replied"] = False
+                else:
+                    await interaction.followup.send("✓", ephemeral=True)
+
+            # Give wrapped the same signature discord.py needs to see
+            new_sig_params = [
+                inspect.Parameter("interaction", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=discord.Interaction)
+            ] + list(discord_params.values())
+            wrapped.__signature__ = inspect.Signature(new_sig_params)
+
+            self.tree.command(name=safe_name, description=description)(wrapped)
+            return handler
+
+        return decorator
+
+    def update_commands(self):
+        if self.is_dm:
+            raise TypeError("Can not set commands when bot is type DM")
+
+        while not self.bot_on:
+            pass
+
+        guild_obj = discord.Object(id=self.guild_id)
+        self.tree.copy_global_to(guild=guild_obj)
+        future = asyncio.run_coroutine_threadsafe(self.tree.sync(guild=guild_obj), self.client.loop)
+        synced = future.result()  # blocks until done, raises any errors
+        print(f"Synced {len(synced)} command(s) to guild {self.guild_id}")
 
     def say(self, message):
         if not message or not str(message).strip():
             return
-        self.msg_queue.put({
-            "type": self.msg_text_payload,
-            "content": message
-        })
+        self.msg_queue.put({"type": self.msg_text_payload, "content": message})
+
+        if not self.is_dm:
+            while self.command_response["bool"]:
+                time.sleep(0.01)
+
 
     def send_image(self, image_path, caption=None):
-        self.msg_queue.put({
-            "type": self.msg_img_payload,
-            "path": image_path,
-            "caption": caption
-        })
+        self.msg_queue.put({"type": self.msg_img_payload, "path": image_path, "caption": caption})
 
-    def ask(self, message, timeout=None):
+    def ask(self, message, timeout=None, return_message_author=False):
         """
         Sends a message and waits for a response.
 
@@ -179,10 +266,18 @@ class DiscordBot:
         self.say(message)
 
         if timeout is None:
-            return self.response_queue.get()
+            user_response = str(self.response_queue.get()).rsplit(":", 1)
+            if return_message_author:
+                return user_response[0], int(user_response[1])
+            else:
+                return user_response[0]
 
         try:
-            return self.response_queue.get(timeout=float(timeout))
+            user_response = str(self.response_queue.get(timeout=float(timeout))).rsplit(":", 1)
+            if return_message_author:
+                return user_response[0], int(user_response[1])
+            else:
+                return user_response[0]
         except Exception:
             return None
 
