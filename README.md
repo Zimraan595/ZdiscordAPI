@@ -525,6 +525,67 @@ async def claim_command(user_id):
 
 > `user_id` is the only special injected parameter. Any handler without it works exactly the same as before — you don't need to add it if you don't use it.
 
+### Command Parameters
+
+Any other parameter you add to your handler automatically becomes a parameter of the Discord slash command — Discord will prompt the user to fill it in when they type `/yourcommand`. No extra setup needed; just add it to the function signature.
+
+```python
+@bot.set_command("greet", "Greet someone")
+async def greet_command(name: str):
+    bot.say(f"Hello, {name}!")
+```
+
+This creates `/greet name:<text>` in Discord.
+
+**Type hints control the input type shown to the user:**
+
+| Type hint | Discord shows |
+|-----------|----------------|
+| `str` | Free text field |
+| `int` | Number field (whole numbers) |
+| `float` | Number field (decimals allowed) |
+| `bool` | True/False toggle |
+| `discord.Member` | User picker (server members) |
+| `discord.User` | User picker |
+| `discord.TextChannel` | Channel picker |
+| `discord.Role` | Role picker |
+
+```python
+@bot.set_command("kick", "Kick a member")
+async def kick_command(member: discord.Member, reason: str):
+    bot.say(f"Kicked {member.mention} for: {reason}")
+```
+
+**Give the user a fixed set of choices with `Literal`:**
+
+Instead of a free-text field, `Literal` turns the parameter into a dropdown of specific options the user must pick from.
+
+```python
+from typing import Literal
+
+@bot.set_command("setstatus", "Set the bot's status")
+async def set_status_command(status: Literal["online", "idle", "dnd"]):
+    bot.say(f"Status set to **{status}**")
+```
+
+This creates `/setstatus status:<dropdown: online | idle | dnd>` — the user can only select one of those three values, they can't type something else.
+
+**Optional parameters** — give the parameter a default value, and Discord marks it as optional in the command:
+
+```python
+@bot.set_command("roll", "Roll a dice")
+async def roll_command(sides: int = 6):
+    bot.say(f"You rolled a {random.randint(1, sides)} (out of {sides})")
+```
+
+**Combine freely** — regular parameters, `Literal` choices, defaults, and `user_id` can all be mixed in the same handler:
+
+```python
+@bot.set_command("warn", "Warn a member")
+async def warn_command(member: discord.Member, severity: Literal["low", "medium", "high"], user_id, reason: str = "No reason given"):
+    bot.say(f"<@{user_id}> warned {member.mention} ({severity}): {reason}")
+```
+
 ### `update_commands()`
 
 Syncs all registered slash commands to Discord so they appear in the `/` menu.
