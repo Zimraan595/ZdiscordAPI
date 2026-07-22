@@ -1,3 +1,4 @@
+import os
 import time
 from typing import TypedDict, Literal, Optional, Any, Sequence, Union
 import discord
@@ -103,7 +104,7 @@ class SentMessage:
         return self._message.content
 
 
-def standerd_button_item(label: str, style: Literal[discord.ButtonStyle.primary, discord.ButtonStyle.secondary, discord.ButtonStyle.success, discord.ButtonStyle.danger], on_click: Callable | None = None, emoji: str | None = None, disabled: bool = False, custom_id: str | None = None,row: int | None = None) -> dict:
+def standerd_button_item(label: str, style: Literal[discord.ButtonStyle.primary, discord.ButtonStyle.secondary, discord.ButtonStyle.success, discord.ButtonStyle.danger], on_click: Callable | None = None, returned_string: str | None = None, emoji: str | None = None, disabled: bool = False, custom_id: str | None = None,row: int | None = None) -> dict:
     return {
         "type": "button",
         "style": style,
@@ -114,6 +115,7 @@ def standerd_button_item(label: str, style: Literal[discord.ButtonStyle.primary,
         "row": row,
         "on_click": on_click,
         "exclusive": True,
+        "returned_string": returned_string
     }
 
 def link_button_item(label: str, url: str, emoji: str | None = None, disabled: bool = False, row: int | None = None):
@@ -208,6 +210,7 @@ class DiscordBot:
             self.command_response = {"bool": False, "func": None, "replied": False}
             self.command_running = False
 
+
     async def on_ready(self):
         if self.print_bot_data:
             print(f'Logged in as {self.client.user.name}')
@@ -283,6 +286,9 @@ class DiscordBot:
                     await self.user.send(content=payload.get("caption"), file=discord.File(payload["path"]))
                 else:
                     await self.channel.send(content=payload.get("caption"), file=discord.File(payload["path"]))
+                
+                if payload.get("delete_after_send"):
+                    os.remove(payload["path"])
 
     def split_by_char_limit(self, items, headroom=100):
         """
@@ -351,9 +357,18 @@ class DiscordBot:
     def run_process(self):
         self.client.run(self.token)
 
-    def start_bot(self):  # main function to start the bot
+    def start_bot(self, wait_until_ready: bool = True, timeout: float | None = None):  # main function to start the bot
         self.p = Thread(target=self.run_process, daemon=True)
         self.p.start()
+
+        if wait_until_ready:
+            start = time.time()
+            while not self.bot_on:
+                if not self.p.is_alive():
+                    raise RuntimeError("Bot thread exited before becoming ready — check token/network.")
+                if timeout is not None and time.time() - start > timeout:
+                    raise TimeoutError("Timed out waiting for bot to become ready.")
+                time.sleep(0.05)
 
     def set_command(self, name, description, exclusive=False):
         safe_name = name.lower().replace(" ", "-")
@@ -374,8 +389,9 @@ class DiscordBot:
                 if "user_id" in handler_params:
                     kwargs["user_id"] = interaction.user.id
 
-                async def respond(message):
-                    await interaction.followup.send(message)
+                async def respond(message, view=MISSING):
+                    view = MISSING if view == None else view
+                    await interaction.followup.send(message, view=view)
 
                 if exclusive and self.command_running:
                     await interaction.followup.send("⚠️ A command is already running, please wait.", ephemeral=True)
@@ -462,10 +478,14 @@ class DiscordBot:
         self.previous_message_obj = SentMessage(self.return_message_obj.pop(), self)
         return self.previous_message_obj
 
-    def send_image(self, image_path, caption=None):
-        self.msg_queue.put({"type": self.msg_img_payload, "path": image_path, "caption": caption})
+    def send_image(self, img_path, caption=None, delete_from_pc_after_send: bool = False):
+        self.send_file(img_path, caption, delete_from_pc_after_send)
 
-    def ask(self, message: str, timeout: bool | None = None, return_message_author: bool = False, return_message_obj: bool = False, *, view: MyView | None = None) -> AskResult | str | None:
+    def send_file(self, file_path, caption=None, delete_from_pc_after_send: bool = False):
+        self.msg_queue.put({"type": self.msg_img_payload, "path": file_path, "caption": caption,
+            "delete_after_send": delete_from_pc_after_send})
+
+    def ask(self, message: str, timeout: float | None = None, return_message_author: bool = False, return_message_obj: bool = False, *, view: MyView | None = None) -> AskResult | str | None:
         """
         Sends a message and waits for a response.
 
@@ -487,7 +507,8 @@ class DiscordBot:
 
         if view is not None:
             def ask_func(ctx: ButtonContext):
-                self.response_queue.put(f"{ctx.label}:{ctx.user_id}")
+                returned_string = ctx.item.get('returned_string')
+                self.response_queue.put(f"{ctx.label if returned_string is None else returned_string}:{ctx.user_id}")
 
             for item in view.items:
                 item.update({"on_click": ask_func})
