@@ -38,7 +38,7 @@ A simple Python abstraction layer for Discord bots. Write Discord bots without t
 
 ## Installation
 
-**First, clone the repo and go `ZdiscordAPI\discord_shared` then copy the absoulute path**
+**First, clone the repo and go to `ZdiscordAPI\discord_shared` then copy the absoulute path**
 
 This is a local editable package. Install it into your project's virtual environment once:
 
